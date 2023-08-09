@@ -1,0 +1,39 @@
+include:
+  - local: Build.ci.yml
+
+.deploy-k8s:
+  stage: deploy
+  image: ghcr.io/helmfile/helmfile:v0.153.1
+  variables:
+    K8S_API_URL: none
+    K8S_TOKEN: none
+    K8S_CI_NAMESPACE: lesson1
+    HELM_DIR: ./helm
+    HELM_NAME: lesson1
+    IMG_REPOSITORY: $YC_REGISTRY_ID_BACKEND_DEV
+    CI_PIPELINE_SOURCE: merge_request_event
+  before_script:
+    - kubectl config set-cluster k8s --insecure-skip-tls-verify=true --server=$K8S_API_URL
+    - kubectl config set-credentials $K8S_USER --token=$K8S_TOKEN
+    - kubectl config set-context ci --cluster=k8s --user=$K8S_USER --namespace=$K8S_CI_NAMESPACE
+    - kubectl config use-context ci
+  script:
+    - echo "Deploying with TAG _${CI_COMMIT_REF_SLUG}"
+    - echo ${CI_PIPELINE_SOURCE}
+  tags:
+    - k8s-erth
+  needs:
+    - job: docker-package
+      optional: false
+
+preprod:
+  extends: .deploy-k8s
+  variables:
+    K8S_API_URL: $K8S_PREPROD_API_URL
+    K8S_TOKEN: $K8S_PREPROD_CI_TOKEN
+    K8S_USER: ci
+  only:
+    - tags
+    - merge_requests
+    - branches
+  when: manual

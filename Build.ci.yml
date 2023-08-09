@@ -1,0 +1,106 @@
+# Общий шаблон сборки
+
+stages:
+  - prepare # Подготовка
+  - package # Сборка приложения: артефакты, докер-образы, helm-чарты.
+
+.rules-package: &rules-package
+  # на merge request всегда запускаем
+  - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    when: always
+  # вручную на ветке, если есть открытый merge request, там уже сборка запущена
+  - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+    when: manual
+  # не запускаем на ветке main или master
+  - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"
+    when: never
+  # на ветках запускаем
+  - if: $CI_COMMIT_BRANCH
+    when: always
+  # на тегах запускаем
+  - if: $CI_COMMIT_TAG
+    when: always
+
+variables:
+  DOCKER_DRIVER: overlay2
+
+# Формирование prepare.env файла с переменными:
+# APP_VERSION, DOCKER_TAG, IMAGE_NAME,
+# YC_REGISTRY_ID, YC_REGISTRY_USER, YC_REGISTRY_PASSWORD (доступ к YandexCloud Container Registry)
+prepare:
+  image: memcached:alpine
+  stage: prepare
+  rules:
+    # то же что в .rules-package, но всегда автоматически
+    # на merge request всегда запускаем
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: always
+      variables:
+        YC_REGISTRY_ID: ${YC_REGISTRY_ID_BACKEND_DEV} # Хранилище для dev образов
+    # вручную на ветке, если есть открытый merge request, там уже сборка запущена
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: manual
+      variables:
+        YC_REGISTRY_ID: ${YC_REGISTRY_ID_BACKEND_DEV} # Хранилище для dev образов
+    # не запускаем на ветке main или master
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"
+      when: never
+    # на тегах запускаем
+    - if: $CI_COMMIT_TAG
+      when: always
+  variables:
+    # Можно переопределить эти переменные в конкретном проекте
+    IMAGE_NAME: ${CI_PROJECT_NAME}
+  script:
+    - echo "CI_PROJECT_NAME=${CI_PROJECT_NAME}"
+    - echo "DOCKER_TAG=${DOCKER_TAG}"
+    # Если это merge request и есть исходная ветка, то берём ее, иначе текущую.
+    # Нужно так как при наличии MR пайплайн на ветке стартовать не будет, а сборку нужно делать для ветки.
+    - BRANCH_SLUG=$(echo ${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME:-$CI_COMMIT_BRANCH} | sed -e 's/[^a-zA-Z0-9]/-/g' | awk '{print tolower($0)}')
+    # Если это тег, то берём его, иначе ветку.
+    - APP_VERSION=${CI_COMMIT_TAG:-${BRANCH_SLUG}}
+    - DOCKER_TAG=$(echo ${APP_VERSION} | sed -e 's/[^a-zA-Z0-9]/-/g' | awk '{print tolower($0)}')
+    - echo "APP_VERSION=${APP_VERSION}" > prepare.env
+    - echo "DOCKER_TAG=${DOCKER_TAG}" >> prepare.env
+  allow_failure: false
+  artifacts:
+    reports:
+      dotenv: prepare.env
+  tags:
+    - yc-k8s-dev
+
+# Шаблон сборки docker-образа
+docker-package:
+  image:
+    name: gcr.io/kaniko-project/executor:v1.9.1-debug
+  stage: package
+  rules: *rules-package
+  needs:
+    - job: prepare
+      optional: false
+  allow_failure: false
+  variables:
+    NEXUS_MOVIX_CACHE_PROXY_CONTAINER_REGISTRY: $NEXUS_DOCKER_REGISTRY
+  script:
+    # Проверка наличия Dockerfile
+    - test -f "${CI_PROJECT_DIR}/Dockerfile" || (echo -e "\e[31mDockerfile not found in ${CI_PROJECT_DIR}/Dockerfile\e[0m" && exit 1)
+    - mkdir -p /kaniko/.docker
+    - YC_CONTAINER_REGISTRY_AUTH=$(printf "%s:%s" ${YC_REGISTRY_USER} "${YC_REGISTRY_PASSWORD}" | base64 | tr -d '\n')
+    - >-
+      echo "{\"auths\":{
+      \"cr.yandex\":{\"auth\":\"${YC_CONTAINER_REGISTRY_AUTH}\"},
+      \"$NEXUS_MOVIX_CACHE_PROXY_CONTAINER_REGISTRY\":{\"auth\":\"$REGISTRY_NEXUS_DOCKER_AUTH_BASE64\"}
+      }}" > /kaniko/.docker/config.json
+    - export GIT_BRANCH="${CI_COMMIT_REF_NAME}"
+    - export GIT_COMMIT="${CI_COMMIT_SHORT_SHA}"
+    - >-
+      /kaniko/executor
+      ${KANIKO_OPTIONS}
+      --build-arg "GIT_COMMIT=${GIT_COMMIT}"
+      --build-arg "GIT_BRANCH=${GIT_BRANCH}"
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "cr.yandex/${YC_REGISTRY_ID}/${IMAGE_NAME}:${DOCKER_TAG}"
+      --log-timestamp=true
+  tags:
+    - yc-k8s-dev

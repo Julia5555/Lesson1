@@ -21,12 +21,6 @@ stages:
   - if: $CI_COMMIT_TAG
     when: always
 
-variables:
-  DOCKER_DRIVER: overlay2
-
-# Формирование prepare.env файла с переменными:
-# APP_VERSION, DOCKER_TAG, IMAGE_NAME,
-# YC_REGISTRY_ID, YC_REGISTRY_USER, YC_REGISTRY_PASSWORD (доступ к YandexCloud Container Registry)
 prepare:
   image: memcached:alpine
   stage: prepare
